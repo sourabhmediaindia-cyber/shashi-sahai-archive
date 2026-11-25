@@ -1,0 +1,837 @@
+/* ==========================================================================
+   Website Content & Image Protection System with Developer Mode (?mode=dev)
+   ========================================================================== */
+(function () {
+  'use strict';
+
+  // 1. Detect Developer Mode via URL query parameter (?mode=dev or ?dev)
+  const urlParams = new URLSearchParams(window.location.search);
+  const isDevMode = urlParams.get('mode') === 'dev' || urlParams.has('dev');
+
+  // Cache for protected blob URLs (src -> blobUrl)
+  const blobUrlCache = new Map();
+
+  // Helper: check if element is an interactive input or form field
+  function isInteractiveInput(el) {
+    if (!el || !el.closest) return false;
+    return Boolean(
+      el.closest('input, textarea, select, [contenteditable="true"], .allow-select')
+    );
+  }
+
+  // Convert raw image URL to local memory Blob URL
+  async function fetchImageAsBlob(src) {
+    if (!src || src.startsWith('blob:') || src.startsWith('data:') || src.endsWith('.svg')) {
+      return src;
+    }
+    if (blobUrlCache.has(src)) {
+      return blobUrlCache.get(src);
+    }
+    try {
+      const response = await fetch(src);
+      if (!response.ok) return src;
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      blobUrlCache.set(src, blobUrl);
+      return blobUrl;
+    } catch (err) {
+      return src;
+    }
+  }
+
+  // Expose global helper for modal lightbox & exhibition viewer
+  window.__getProtectedImageUrl = function (src) {
+    if (isDevMode || !src) return src;
+    if (blobUrlCache.has(src)) return blobUrlCache.get(src);
+    fetchImageAsBlob(src).then(blobUrl => {
+      if (blobUrl && blobUrl !== src) {
+        const modalImg = document.getElementById('modalPreviewImg');
+        if (modalImg && modalImg.src.includes(src)) {
+          modalImg.src = blobUrl;
+        }
+        const viewerImg = document.getElementById('viewer-image');
+        if (viewerImg && viewerImg.src.includes(src)) {
+          viewerImg.src = blobUrl;
+        }
+      }
+    }).catch(() => {});
+    return src;
+  };
+
+  // Protect an individual image element with blob URL delivery
+  async function protectImageElement(img) {
+    if (isDevMode || !img) return;
+    const rawSrc = img.getAttribute('src');
+    if (!rawSrc || rawSrc.startsWith('blob:') || rawSrc.startsWith('data:') || rawSrc.endsWith('.svg')) {
+      return;
+    }
+    if (img.dataset.protectedBlob === 'true') return;
+
+    try {
+      const blobUrl = await fetchImageAsBlob(rawSrc);
+      if (blobUrl && blobUrl !== rawSrc) {
+        img.dataset.protectedBlob = 'true';
+        img.src = blobUrl;
+        if (img.hasAttribute('srcset')) {
+          img.dataset.origSrcset = img.getAttribute('srcset');
+          img.removeAttribute('srcset');
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Attach invisible protective shield overlay to image parent containers
+  function attachProtectionShields() {
+    if (isDevMode) return;
+    const images = document.querySelectorAll('img:not(.brand-logo-img)');
+    images.forEach(img => {
+      const parent = img.parentElement;
+      if (!parent) return;
+
+      const computed = window.getComputedStyle(parent);
+      if (computed.position === 'static') {
+        parent.style.position = 'relative';
+      }
+
+      if (!parent.querySelector(':scope > .img-shield-overlay')) {
+        const shield = document.createElement('div');
+        shield.className = 'img-shield-overlay';
+        shield.setAttribute('aria-hidden', 'true');
+        parent.appendChild(shield);
+      }
+
+      protectImageElement(img);
+    });
+  }
+
+  // Developer Mode Badge UI
+  function renderDevModeBadge() {
+    if (document.getElementById('devModeBadge')) return;
+
+    const badge = document.createElement('div');
+    badge.id = 'devModeBadge';
+    badge.className = 'dev-mode-badge';
+    badge.setAttribute('role', 'status');
+    badge.setAttribute('aria-label', 'Developer Mode Active');
+    badge.innerHTML = `
+      <span class="dev-badge-dot" aria-hidden="true"></span>
+      <span class="dev-badge-text">
+        <span>⚡ DEV MODE</span>
+        <span class="dev-badge-tag">Full Access</span>
+      </span>
+      <button type="button" class="dev-mode-exit-btn" id="exitDevModeBtn" title="Return to Protected Normal Mode">Exit</button>
+    `;
+
+    document.body.appendChild(badge);
+
+    const exitBtn = document.getElementById('exitDevModeBtn');
+    if (exitBtn) {
+      exitBtn.addEventListener('click', () => {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('mode');
+        url.searchParams.delete('dev');
+        window.location.href = url.pathname + (url.search ? url.search : '') + url.hash;
+      });
+    }
+  }
+
+  // Preserve ?mode=dev across internal site navigation
+  function setupDevModeLinks() {
+    document.addEventListener('click', (e) => {
+      const link = e.target.closest('a');
+      if (!link || !link.href) return;
+      try {
+        const targetUrl = new URL(link.href, window.location.href);
+        if (targetUrl.origin === window.location.origin) {
+          if (!targetUrl.searchParams.has('mode') && !targetUrl.hash.startsWith('#_')) {
+            const path = targetUrl.pathname.toLowerCase();
+            if (path.endsWith('.html') || path.endsWith('/') || !path.includes('.')) {
+              targetUrl.searchParams.set('mode', 'dev');
+              link.href = targetUrl.toString();
+            }
+          }
+        }
+      } catch (err) {}
+    }, true);
+  }
+
+  // -------------------------------------------------------------------------
+  // MODE DISPATCHER
+  // -------------------------------------------------------------------------
+  if (isDevMode) {
+    // DEVELOPER MODE: Full access, disable all protections
+    document.documentElement.classList.add('dev-mode');
+    document.addEventListener('DOMContentLoaded', () => {
+      document.body.classList.add('dev-mode');
+      renderDevModeBadge();
+      setupDevModeLinks();
+    });
+  } else {
+    // NORMAL MODE: Content & Image Protection Active
+    document.documentElement.classList.remove('dev-mode');
+
+    // 1. Disable Right-Click Context Menu (except on form inputs)
+    document.addEventListener('contextmenu', (e) => {
+      if (isInteractiveInput(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }, true);
+
+    // 2. Prevent Copy & Cut (except in form inputs)
+    document.addEventListener('copy', (e) => {
+      if (isInteractiveInput(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }, true);
+
+    document.addEventListener('cut', (e) => {
+      if (isInteractiveInput(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    }, true);
+
+    // 3. Prevent Text Selection Start via Mouse
+    document.addEventListener('selectstart', (e) => {
+      if (isInteractiveInput(e.target)) return;
+      e.preventDefault();
+      return false;
+    }, true);
+
+    // 4. Disable Image & Element Dragging
+    document.addEventListener('dragstart', (e) => {
+      if (isInteractiveInput(e.target)) return;
+      e.preventDefault();
+      return false;
+    }, true);
+
+    // 5. Prevent Keyboard Shortcuts: Ctrl+C, Ctrl+A, Ctrl+X, Ctrl+U, Ctrl+S, Ctrl+P, F12, Ctrl+Shift+I/J/C
+    document.addEventListener('keydown', (e) => {
+      if (isInteractiveInput(e.target)) return;
+
+      const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+      if (isCtrlOrCmd) {
+        const key = (e.key || '').toLowerCase();
+        // c: copy, x: cut, a: select all, u: view source, s: save page, p: print
+        if (['c', 'x', 'a', 'u', 's', 'p'].includes(key)) {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        }
+
+        // Ctrl+Shift+I / J / C (DevTools inspector shortcuts)
+        if (e.shiftKey && ['i', 'j', 'c'].includes(key)) {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        }
+      }
+
+      // F12 developer console shortcut in normal mode
+      if (e.key === 'F12') {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      }
+    }, true);
+
+    // 6. Shield overlays and Blob conversion on DOM ready and dynamic changes
+    document.addEventListener('DOMContentLoaded', () => {
+      document.body.classList.remove('dev-mode');
+      attachProtectionShields();
+
+      // Observe dynamically added images (e.g. from filtering, ajax, tabs)
+      const observer = new MutationObserver((mutations) => {
+        let hasNewImages = false;
+        for (const m of mutations) {
+          if (m.addedNodes.length > 0) {
+            hasNewImages = true;
+            break;
+          }
+        }
+        if (hasNewImages) {
+          attachProtectionShields();
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
+  }
+})();
+
+document.addEventListener('DOMContentLoaded', () => {
+  // ── Responsive Hamburger Nav ────────────────────────────
+  const navToggle = document.getElementById('navToggle');
+  const navLinks  = document.getElementById('navLinks');
+  const siteHeader = document.getElementById('siteHeader');
+
+  if (navToggle && navLinks) {
+    navToggle.addEventListener('click', () => {
+      const isOpen = navLinks.classList.toggle('open');
+      navToggle.classList.toggle('open', isOpen);
+      navToggle.setAttribute('aria-expanded', isOpen);
+    });
+
+    // Close drawer when a link is clicked (mobile)
+    navLinks.querySelectorAll('a').forEach(link => {
+      link.addEventListener('click', () => {
+        navLinks.classList.remove('open');
+        navToggle.classList.remove('open');
+        navToggle.setAttribute('aria-expanded', 'false');
+      });
+    });
+
+    // Close on ESC key
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && navLinks.classList.contains('open')) {
+        navLinks.classList.remove('open');
+        navToggle.classList.remove('open');
+        navToggle.setAttribute('aria-expanded', 'false');
+        navToggle.focus();
+      }
+    });
+
+    // Close when clicking outside the header
+    document.addEventListener('click', (e) => {
+      if (siteHeader && !siteHeader.contains(e.target) && navLinks.classList.contains('open')) {
+        navLinks.classList.remove('open');
+        navToggle.classList.remove('open');
+        navToggle.setAttribute('aria-expanded', 'false');
+      }
+    });
+  }
+
+  // Header scroll shadow
+  if (siteHeader) {
+    window.addEventListener('scroll', () => {
+      siteHeader.classList.toggle('scrolled', window.scrollY > 8);
+    }, { passive: true });
+  }
+
+  // ── Top Scroll Progress Line Indicator (Requirement 7) ────
+  function initScrollProgress() {
+    let progressBar = document.getElementById('scrollProgressBar');
+    if (!progressBar) {
+      progressBar = document.createElement('div');
+      progressBar.id = 'scrollProgressBar';
+      progressBar.className = 'scroll-progress-bar';
+      progressBar.setAttribute('aria-hidden', 'true');
+      document.body.prepend(progressBar);
+    }
+
+    function updateProgress() {
+      const scrollTop = window.scrollY || document.documentElement.scrollTop;
+      const scrollHeight = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+      const progress = scrollHeight > 0 ? (scrollTop / scrollHeight) * 100 : 0;
+      progressBar.style.width = `${Math.min(Math.max(progress, 0), 100)}%`;
+    }
+
+    window.addEventListener('scroll', updateProgress, { passive: true });
+    window.addEventListener('resize', updateProgress, { passive: true });
+    updateProgress();
+  }
+  initScrollProgress();
+
+  // Reveal Animations
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        e.target.classList.add('in-view');
+        io.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.05, rootMargin: '0px 0px -20px 0px' });
+  document.querySelectorAll('.reveal, .reveal-img').forEach(el => io.observe(el));
+
+  // Timeline Spine & Dot Scroll Synchronizer
+  const tlTrack = document.querySelector('.tl-track');
+  const tlSpine = document.querySelector('.tl-spine');
+  const tlFill = document.getElementById('tlFill');
+  const tlRows = document.querySelectorAll('.tl-row');
+
+  if (tlTrack && tlSpine && tlFill && tlRows.length) {
+    function alignTimelineSpine() {
+      const dots = document.querySelectorAll('.tl-dot');
+      if (!dots.length) return;
+      const trackRect = tlTrack.getBoundingClientRect();
+      const firstDotRect = dots[0].getBoundingClientRect();
+      const lastDotRect = dots[dots.length - 1].getBoundingClientRect();
+
+      const topOffset = (firstDotRect.top - trackRect.top) + (firstDotRect.height / 2);
+      const totalSpineHeight = (lastDotRect.top - firstDotRect.top);
+
+      tlSpine.style.top = `${topOffset}px`;
+      tlSpine.style.height = `${Math.max(totalSpineHeight, 40)}px`;
+      tlSpine.style.bottom = 'auto';
+    }
+
+    function updateTimelineProgress() {
+      const dots = document.querySelectorAll('.tl-dot');
+      if (!dots.length) return;
+
+      const vh = window.innerHeight;
+      const triggerY = vh * 0.52; // Focal center line for timeline activation
+
+      const spineRect = tlSpine.getBoundingClientRect();
+      const spineTop = spineRect.top;
+      const spineHeight = spineRect.height;
+
+      if (spineHeight > 0) {
+        const scrolled = triggerY - spineTop;
+        const progressPct = Math.min(Math.max((scrolled / spineHeight) * 100, 0), 100);
+        tlFill.style.height = `${progressPct}%`;
+      }
+
+      dots.forEach(dot => {
+        const dotRect = dot.getBoundingClientRect();
+        const dotCenterY = dotRect.top + (dotRect.height / 2);
+        const row = dot.closest('.tl-row');
+        if (dotCenterY <= triggerY + 12) {
+          dot.classList.add('active');
+          if (row) row.classList.add('in-view');
+        } else {
+          dot.classList.remove('active');
+        }
+      });
+    }
+
+    window.addEventListener('load', () => {
+      alignTimelineSpine();
+      updateTimelineProgress();
+    });
+    window.addEventListener('resize', () => {
+      alignTimelineSpine();
+      updateTimelineProgress();
+    }, { passive: true });
+    window.addEventListener('scroll', updateTimelineProgress, { passive: true });
+
+    // Initial pass
+    alignTimelineSpine();
+    updateTimelineProgress();
+  }
+
+  // Tribute Tabs Switcher
+  const tributeTabs = document.querySelectorAll('.tribute-tab-btn');
+  tributeTabs.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tributeTabs.forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tribute-tab-content').forEach(c => c.classList.remove('active'));
+      btn.classList.add('active');
+      const targetId = btn.getAttribute('data-tab');
+      const targetContent = document.getElementById(targetId);
+      if (targetContent) targetContent.classList.add('active');
+    });
+  });
+
+  // Gallery Category Filter Tabs (Home page mosaic)
+  const catTabs = document.querySelectorAll('.gallery-cats span');
+  const mosaicItems = document.querySelectorAll('.mosaic .m-item');
+  catTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      catTabs.forEach(t => t.classList.remove('on'));
+      tab.classList.add('on');
+      const selectedCat = (tab.getAttribute('data-cat') || tab.textContent.trim()).toLowerCase();
+
+      mosaicItems.forEach(item => {
+        const itemTag = (item.querySelector('.m-label')?.textContent || '').toLowerCase();
+        if (selectedCat === 'all' || itemTag === selectedCat) {
+          item.style.display = 'block';
+          item.style.opacity = '1';
+          item.style.transform = 'scale(1)';
+        } else {
+          item.style.display = 'none';
+          item.style.opacity = '0';
+          item.style.transform = 'scale(0.95)';
+        }
+      });
+    });
+  });
+
+  // ── Photo Archive & Portfolio Category Filtering (Requirements 1 & 4) ────
+  function setupCategoryFiltering(filterBtnSelector, cardSelector) {
+    const filterBtns = document.querySelectorAll(filterBtnSelector);
+    const cards = document.querySelectorAll(cardSelector);
+
+    if (filterBtns.length && cards.length) {
+      filterBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          filterBtns.forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          const filterCategory = (btn.getAttribute('data-category') || 'all').toLowerCase();
+
+          cards.forEach(card => {
+            const cardCategory = (card.getAttribute('data-category') || '').toLowerCase();
+            if (filterCategory === 'all' || cardCategory === filterCategory) {
+              card.style.display = 'flex';
+              requestAnimationFrame(() => {
+                card.style.opacity = '1';
+                card.style.transform = 'scale(1)';
+              });
+            } else {
+              card.style.opacity = '0';
+              card.style.transform = 'scale(0.96)';
+              setTimeout(() => {
+                const currentActive = document.querySelector(`${filterBtnSelector}.active`);
+                const currentCat = (currentActive?.getAttribute('data-category') || 'all').toLowerCase();
+                if (currentCat !== 'all' && (card.getAttribute('data-category') || '').toLowerCase() !== currentCat) {
+                  card.style.display = 'none';
+                }
+              }, 250);
+            }
+          });
+        });
+      });
+    }
+  }
+
+  setupCategoryFiltering('.archive-filter-btn', '.archive-photo-card');
+  setupCategoryFiltering('.portfolio-filter-btn', '.portfolio-photo-card');
+
+  // Image Preview Lightbox Modal Logic
+  function ensureLightboxModalExists() {
+    let modal = document.getElementById('imagePreviewModal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'imagePreviewModal';
+      modal.className = 'img-preview-modal';
+      modal.setAttribute('aria-hidden', 'true');
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-label', 'Image Preview Modal');
+      modal.innerHTML = `
+        <div class="modal-overlay" id="modalOverlay"></div>
+        <div class="modal-dialog-box">
+            <button class="modal-close-btn" id="modalCloseBtn" aria-label="Close modal">&times;</button>
+            <button class="modal-arrow modal-arrow-prev" id="modalPrevBtn" aria-label="Previous image">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+            </button>
+            <button class="modal-arrow modal-arrow-next" id="modalNextBtn" aria-label="Next image">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+            </button>
+            <div class="modal-body-content">
+                <div class="modal-img-container">
+                    <div class="img-shield-overlay" aria-hidden="true"></div>
+                    <img id="modalPreviewImg" src="" alt="Full view photograph">
+                </div>
+                <div class="modal-footer-caption">
+                    <div class="caption-left">
+                        <span id="modalImgTag" class="modal-tag">Archive</span>
+                        <h4 id="modalImgTitle" class="modal-title">Photo Preview</h4>
+                        <p id="modalImgDesc" class="modal-desc mb-0" style="font-family: var(--serif); font-style: italic; font-size: 0.875rem; color: rgba(255,255,255,0.78); margin-top: 4px; line-height: 1.45;"></p>
+                    </div>
+                    <div class="caption-right">
+                        <span id="modalImgCounter" class="modal-counter">1 / 1</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
+    return modal;
+  }
+
+  function initLightbox() {
+    const modal = ensureLightboxModalExists();
+    const modalImg = document.getElementById('modalPreviewImg');
+    const modalTag = document.getElementById('modalImgTag');
+    const modalTitle = document.getElementById('modalImgTitle');
+    const modalDesc = document.getElementById('modalImgDesc');
+    const modalCounter = document.getElementById('modalImgCounter');
+    const closeBtn = document.getElementById('modalCloseBtn');
+    const overlay = document.getElementById('modalOverlay');
+    const prevBtn = document.getElementById('modalPrevBtn');
+    const nextBtn = document.getElementById('modalNextBtn');
+
+    let previewElements = [];
+    let currentIndex = 0;
+
+    function getVisiblePreviewElements() {
+      const all = Array.from(document.querySelectorAll(
+        '.portfolio-photo-card, .archive-photo-card, .portfolio-project-card, .strip-item, .mosaic .m-item, .tribute-photo-card, .tl-thumb, .archive-visual .main-img, .archive-visual .float-img'
+      ));
+      return all.filter(el => {
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.opacity !== '0';
+      });
+    }
+
+    function getPhotoData(el) {
+      const img = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
+      const tag = el.querySelector('.portfolio-photo-tag-pill, .archive-photo-tag-pill, .portfolio-project-eyebrow, .strip-tag span, .m-label, .modal-tag')?.textContent.trim() || 'Portfolio';
+      const title = el.querySelector('.portfolio-photo-card-title, .archive-photo-card-title, .portfolio-project-title')?.textContent.trim() || img?.getAttribute('alt') || 'Photograph by Shashi Sahai';
+      const desc = el.querySelector('.portfolio-photo-card-desc, .archive-photo-card-desc, .portfolio-project-desc')?.textContent.trim() || '';
+      const src = img?.getAttribute('src') || '';
+      return { src, tag, title, desc };
+    }
+
+    function updateModal(index) {
+      previewElements = getVisiblePreviewElements();
+      if (previewElements.length === 0) return;
+      if (index < 0) index = previewElements.length - 1;
+      if (index >= previewElements.length) index = 0;
+      currentIndex = index;
+
+      const data = getPhotoData(previewElements[currentIndex]);
+      if (modalImg) {
+        modalImg.style.opacity = '0';
+        setTimeout(() => {
+          modalImg.src = window.__getProtectedImageUrl ? window.__getProtectedImageUrl(data.src) : data.src;
+          modalImg.alt = data.title;
+          if (modalTag) modalTag.textContent = data.tag;
+          if (modalTitle) modalTitle.textContent = data.title;
+          if (modalDesc) {
+            modalDesc.textContent = data.desc;
+            modalDesc.style.display = data.desc ? 'block' : 'none';
+          }
+          if (modalCounter) modalCounter.textContent = `${currentIndex + 1} / ${previewElements.length}`;
+          modalImg.style.opacity = '1';
+        }, 80);
+      }
+    }
+
+    function openModalForElement(targetEl) {
+      previewElements = getVisiblePreviewElements();
+      let idx = previewElements.indexOf(targetEl);
+      if (idx === -1) idx = 0;
+      updateModal(idx);
+      modal.classList.add('active');
+      modal.setAttribute('aria-hidden', 'false');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeModal() {
+      modal.classList.remove('active');
+      modal.setAttribute('aria-hidden', 'true');
+      document.body.style.overflow = '';
+    }
+
+    // Global Click Listener for all preview items
+    document.addEventListener('click', (e) => {
+      const card = e.target.closest(
+        '.portfolio-photo-card, .archive-photo-card, .portfolio-project-card, .strip-item, .mosaic .m-item, .tribute-photo-card, .tl-thumb, .archive-visual .main-img, .archive-visual .float-img'
+      );
+      if (card) {
+        if (card.tagName === 'A' && card.getAttribute('href') && !card.getAttribute('href').startsWith('#')) {
+          return;
+        }
+        e.preventDefault();
+        openModalForElement(card);
+      }
+    });
+
+    if (closeBtn) closeBtn.addEventListener('click', closeModal);
+    if (overlay) overlay.addEventListener('click', closeModal);
+    if (prevBtn) prevBtn.addEventListener('click', (e) => { e.stopPropagation(); updateModal(currentIndex - 1); });
+    if (nextBtn) nextBtn.addEventListener('click', (e) => { e.stopPropagation(); updateModal(currentIndex + 1); });
+
+    document.addEventListener('keydown', (e) => {
+      if (!modal.classList.contains('active')) return;
+      if (e.key === 'Escape') closeModal();
+      if (e.key === 'ArrowLeft') updateModal(currentIndex - 1);
+      if (e.key === 'ArrowRight') updateModal(currentIndex + 1);
+    });
+  }
+
+  initLightbox();
+
+  // Interactive Tribute Wall Form & LocalStorage Logic
+  const tributeForm = document.getElementById('tributeForm');
+  const tributeWallGrid = document.getElementById('tributeWallGrid');
+
+  function escapeHtml(str) {
+    return (str || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function renderTributeCard(data, prepend = true) {
+    if (!tributeWallGrid) return;
+    const card = document.createElement('div');
+    card.className = 'tribute-wall-card';
+    const initial = (data.name || 'A').charAt(0).toUpperCase();
+    const roleText = data.role ? data.role : 'Well-Wisher & Admirer';
+    card.innerHTML = `
+      <div class="tribute-wall-text">“${escapeHtml(data.message)}”</div>
+      <div class="tribute-wall-meta">
+        <div class="tribute-avatar">${initial}</div>
+        <div>
+          <div class="tribute-wall-author">${escapeHtml(data.name)}</div>
+          <div class="tribute-wall-role">${escapeHtml(roleText)}</div>
+        </div>
+        <div class="tribute-wall-date">${data.date || 'Today'}</div>
+      </div>
+    `;
+    if (prepend) {
+      tributeWallGrid.insertBefore(card, tributeWallGrid.firstChild);
+    } else {
+      tributeWallGrid.appendChild(card);
+    }
+  }
+
+  function loadSavedTributes() {
+    if (!tributeWallGrid) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem('shashi_tributes') || '[]');
+      saved.forEach(item => {
+        renderTributeCard(item, false);
+      });
+    } catch (err) {
+      console.error('Error loading tributes:', err);
+    }
+  }
+
+  if (tributeForm) {
+    loadSavedTributes();
+    tributeForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const name = document.getElementById('authorName')?.value.trim();
+      const role = document.getElementById('authorRole')?.value.trim();
+      const message = document.getElementById('tributeMsg')?.value.trim();
+      if (!name || !message) return;
+
+      const dateStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      const newTribute = { name, role, message, date: dateStr };
+
+      renderTributeCard(newTribute, true);
+
+      try {
+        const saved = JSON.parse(localStorage.getItem('shashi_tributes') || '[]');
+        saved.unshift(newTribute);
+        localStorage.setItem('shashi_tributes', JSON.stringify(saved));
+      } catch (err) {
+        console.error('Error saving tribute:', err);
+      }
+
+      tributeForm.reset();
+      const formCard = document.querySelector('.tribute-form-card');
+      if (formCard) {
+        const alertMsg = document.createElement('div');
+        alertMsg.className = 'alert alert-success mt-3 text-center py-2';
+        alertMsg.style.fontSize = '0.85rem';
+        alertMsg.style.background = 'rgba(25, 135, 84, 0.2)';
+        alertMsg.style.border = '1px solid rgba(25, 135, 84, 0.5)';
+        alertMsg.style.color = '#75b798';
+        alertMsg.textContent = '✨ Thank you! Your memory has been posted to the Tribute Wall.';
+        formCard.appendChild(alertMsg);
+        setTimeout(() => alertMsg.remove(), 4000);
+      }
+    });
+  }
+
+  // Swiper Slider for Archival Frames Gallery
+  if (typeof Swiper !== 'undefined' && document.querySelector('.archivalSwiper')) {
+    new Swiper('.archivalSwiper', {
+      slidesPerView: 1,
+      spaceBetween: 20,
+      loop: true,
+      autoplay: {
+        delay: 3500,
+        disableOnInteraction: false,
+      },
+      pagination: {
+        el: '.swiper-pagination',
+        clickable: true,
+      },
+      navigation: {
+        nextEl: '.swiper-button-next',
+        prevEl: '.swiper-button-prev',
+      },
+      breakpoints: {
+        576: {
+          slidesPerView: 2,
+          spaceBetween: 20,
+        },
+        992: {
+          slidesPerView: 3,
+          spaceBetween: 24,
+        }
+      }
+    });
+  }
+
+  // Preview Horizontal Strip Gallery Controller
+  const previewTrack = document.getElementById('previewStripTrack');
+  const previewPrev = document.getElementById('previewPrevBtn');
+  const previewNext = document.getElementById('previewNextBtn');
+  const previewThumb = document.getElementById('previewScrollThumb');
+
+  if (previewTrack) {
+    function updateScrollProgress() {
+      const maxScroll = previewTrack.scrollWidth - previewTrack.clientWidth;
+      if (maxScroll <= 0) {
+        if (previewThumb) previewThumb.style.width = '100%';
+        if (previewPrev) previewPrev.disabled = true;
+        if (previewNext) previewNext.disabled = true;
+        return;
+      }
+      const scrollRatio = previewTrack.scrollLeft / maxScroll;
+      const thumbWidthPercent = Math.max((previewTrack.clientWidth / previewTrack.scrollWidth) * 100, 25);
+      if (previewThumb) {
+        previewThumb.style.width = `${thumbWidthPercent}%`;
+        const maxTranslate = ((100 - thumbWidthPercent) / thumbWidthPercent) * 100;
+        previewThumb.style.transform = `translateX(${scrollRatio * maxTranslate}%)`;
+      }
+      if (previewPrev) previewPrev.disabled = previewTrack.scrollLeft <= 5;
+      if (previewNext) previewNext.disabled = previewTrack.scrollLeft >= maxScroll - 5;
+    }
+
+    if (previewPrev) {
+      previewPrev.addEventListener('click', () => {
+        const card = previewTrack.querySelector('.preview-strip-card');
+        const scrollAmount = card ? card.offsetWidth + 16 : 220;
+        previewTrack.scrollBy({ left: -scrollAmount, behavior: 'smooth' });
+      });
+    }
+
+    if (previewNext) {
+      previewNext.addEventListener('click', () => {
+        const card = previewTrack.querySelector('.preview-strip-card');
+        const scrollAmount = card ? card.offsetWidth + 16 : 220;
+        previewTrack.scrollBy({ left: scrollAmount, behavior: 'smooth' });
+      });
+    }
+
+    previewTrack.addEventListener('scroll', updateScrollProgress, { passive: true });
+    window.addEventListener('resize', updateScrollProgress, { passive: true });
+    updateScrollProgress();
+
+    // Mouse drag-to-scroll interaction for desktop
+    let isDown = false;
+    let startX = 0;
+    let scrollLeftPos = 0;
+    let hasDragged = false;
+
+    previewTrack.addEventListener('mousedown', (e) => {
+      isDown = true;
+      hasDragged = false;
+      startX = e.pageX - previewTrack.offsetLeft;
+      scrollLeftPos = previewTrack.scrollLeft;
+    });
+
+    previewTrack.addEventListener('mouseleave', () => {
+      isDown = false;
+    });
+
+    previewTrack.addEventListener('mouseup', () => {
+      isDown = false;
+    });
+
+    previewTrack.addEventListener('mousemove', (e) => {
+      if (!isDown) return;
+      const x = e.pageX - previewTrack.offsetLeft;
+      const walk = (x - startX) * 1.5;
+      if (Math.abs(walk) > 5) {
+        hasDragged = true;
+      }
+      previewTrack.scrollLeft = scrollLeftPos - walk;
+    });
+
+    // Prevent click on card if dragged
+    previewTrack.querySelectorAll('a.preview-strip-card').forEach(link => {
+      link.addEventListener('click', (e) => {
+        if (hasDragged) {
+          e.preventDefault();
+        }
+      });
+    });
+  }
+});
